@@ -1,0 +1,58 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationBarTitleText": "早八",
+        "disableScroll": true,
+        "enablePullDownRefresh": false,
+        "app-plus": {
+          "bounce": "none"
+        }
+      }
+    },
+    {
+      "path": "pages/mine/mine",
+      "style": {
+        "navigationBarTitleText": "我的",
+        "enablePullDownRefresh": false,
+        "app-plus": {
+          "bounce": "none"
+        }
+      }
+    },
+    {
+      "path": "pages/periods/periods",
+      "style": {
+        "navigationBarTitleText": "节次表",
+        "enablePullDownRefresh": false
+      }
+    }
+  ],
+  "tabBar": {
+    "color": "#8e8e93",
+    "selectedColor": "#007aff",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "课表",
+        "iconPath": "static/tab/calendar-normal.png",
+        "selectedIconPath": "static/tab/calendar-blue.png"
+      },
+      {
+        "pagePath": "pages/mine/mine",
+        "text": "我的",
+        "iconPath": "static/tab/contact-normal.png",
+        "selectedIconPath": "static/tab/contact-blue.png"
+      }
+    ]
+  },
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "早八",
+    "navigationBarBackgroundColor": "#ffffff",
+    "backgroundColor": "#f2f3f6"
+  }
+}

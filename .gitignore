@@ -1,0 +1,14 @@
+# 依赖与构建产物
+node_modules/
+dist/
+unpackage/
+.memsearch/
+
+# 安装包 / 证书不进仓库
+*.apk
+*.keystore
+*.jks
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
