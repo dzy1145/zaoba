@@ -1,11 +1,12 @@
 # 早八 · 离线课表（Android）
-希望大家能向我提交各个学校的课表格式！
-一个**纯本地**的安卓 App：
+
+把微信小程序「丸辣明天又是早八」的个人课表搬成一个**纯本地**的安卓 App：
 所有数据都存在手机 SQLite 里，没有账号、没有云端、不联网。
 
 原版的「共享课表」依赖云开发，APK 里没有这个能力，所以数据搬运改成
 **导出/导入 JSON**；另外支持把教务系统导出的 **Excel 97-2003 (.xls) 课表**
-直接解析、转换后导入。
+直接解析、转换后导入，以及**登录教务系统自动抓取课表**（复用开源项目
+[拾光课程表](https://github.com/ShiGuangSchedule/shiguangschedule) 的 269 校适配库）。
 
 ## 功能
 
@@ -15,6 +16,8 @@
 - **节次表**：自定义每节起止时间，改动即时落库（没有保存按钮）
 - **外观**：浅色 / 深色 / 跟随系统 + 4 种强调色，导航栏、状态栏、TabBar 同步
 - **数据**：导出 JSON 到剪贴板 / 从剪贴板导入（覆盖、追加）；导入教务 `.xls`
+- **教务导入**：内置 269 所学校 / 298 个适配器索引，选学校 → App 内 WebView 登录教务 →
+  适配脚本抓取课表并转换成早八课程（适配脚本运行时从社区镜像拉取并缓存）
 
 ## 技术栈
 
@@ -45,7 +48,12 @@ cli pack --project <项目目录> --platform android \
 | `zaoba-app/src/services/database.js` | SQLite / localStorage 双态数据层，含导入导出与「当前学期」 |
 | `zaoba-app/src/utils/schedule.js` | 日期 ↔ 周次换算、`hitDate` 判断某天是否上课 |
 | `zaoba-app/src/utils/xls.js`、`xlsTimetable.js` | 教务 `.xls` 解析 → 早八 JSON |
-| `zaoba-app/scripts/` | xls 解析回归脚本 |
+| `zaoba-app/src/pages/import/import.vue` | 教务导入：学校列表、选适配器、进度 |
+| `zaoba-app/src/services/importWebview.js` | 教务导入的 WebView 宿主与 JS 桥（App 专用） |
+| `zaoba-app/src/services/shiguangImport.js` | 拾光标准 JSON → 早八课表（周次拆段、幂等落库） |
+| `zaoba-app/src/services/adapterSource.js` | 适配脚本按需拉取 + 缓存（Gitee → jsDelivr → GitHub raw） |
+| `zaoba-app/src/data/schoolIndex.js` | 学校/适配器索引（`scripts/build-school-index.mjs` 生成） |
+| `zaoba-app/scripts/` | xls 解析、拾光映射、注入脚本的回归脚本 |
 | `早八-项目记忆.md` | 架构决定与踩过的坑（开发记录） |
 | `图标设计/` | App 图标的设计源文件 |
 
@@ -71,3 +79,14 @@ APK 和小程序共用一套 JSON，可以互相粘贴导入：
 
 - 仓库只放源码和设计源文件：`node_modules/`、`dist/`、APK 产物不进仓库，APK 走 Release。
 - `早八-项目记忆.md` 是开发过程记录，里面的本机路径、设备序列号、账号信息已脱敏。
+
+## 致谢与许可
+
+教务导入这一块复用开源项目「拾光课程表」的适配体系，版权归原作者：
+
+- [ShiGuangSchedule/shiguangschedule](https://github.com/ShiGuangSchedule/shiguangschedule)（Apache-2.0）——
+  课表导入的 JS 桥协议；
+- [ShiGuangSchedule/shiguang_warehouse](https://github.com/ShiGuangSchedule/shiguang_warehouse)（MIT）——
+  学校索引与各校适配脚本（脚本不进本仓库，运行时按需拉取）。
+
+完整声明见 `zaoba-app/NOTICE.md`，许可全文在 `zaoba-app/licenses/` 下。

@@ -27,6 +27,13 @@
         "navigationBarTitleText": "节次表",
         "enablePullDownRefresh": false
       }
+    },
+    {
+      "path": "pages/import/import",
+      "style": {
+        "navigationBarTitleText": "教务导入",
+        "enablePullDownRefresh": false
+      }
     }
   ],
   "tabBar": {

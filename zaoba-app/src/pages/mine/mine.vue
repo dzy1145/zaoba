@@ -84,6 +84,14 @@
         </view>
         <view class="card-arrow">›</view>
       </view>
+      <view class="card-row" @tap="goSchoolImport">
+        <view class="card-icon">🏫</view>
+        <view class="card-body">
+          <view class="card-title">教务导入</view>
+          <view class="card-sub">登录教务系统自动抓取课表</view>
+        </view>
+        <view class="card-arrow">›</view>
+      </view>
     </view>
 
     <!-- 昵称弹窗 -->
@@ -377,6 +385,11 @@ export default {
 
     goPeriods() {
       uni.navigateTo({ url: '/pages/periods/periods' })
+    },
+
+    // 教务导入：选学校 → 在 WebView 里登录教务 → 适配脚本回传课程 → 落库
+    goSchoolImport() {
+      uni.navigateTo({ url: '/pages/import/import' })
     },
 
     /* ---- 昵称 ---- */
