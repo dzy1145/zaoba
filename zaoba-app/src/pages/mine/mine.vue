@@ -94,6 +94,25 @@
       </view>
     </view>
 
+    <!-- 关于 / 更新 -->
+    <view class="card">
+      <view class="card-row" @tap="checkUpdate">
+        <view class="card-icon">🔄</view>
+        <view class="card-body">
+          <view class="card-title">检查更新</view>
+          <view class="card-sub">当前版本{{ versionName ? ' v' + versionName : '' }}</view>
+        </view>
+        <view class="card-arrow">›</view>
+      </view>      <view class="card-row">
+        <view class="card-icon">⚙️</view>
+        <view class="card-body">
+          <view class="card-title">自动检查更新</view>
+          <view class="card-sub">启动时静默检查，有新版本才提示</view>
+        </view>
+        <switch :checked="autoCheck" color="#007aff" style="transform: scale(0.85);" @change="onAutoCheckChange" />
+      </view>
+    </view>
+
     <!-- 昵称弹窗 -->
     <view v-if="showNicknameModal" class="mask" @tap="closeNicknameModal">
       <view class="modal" @tap.stop>
@@ -261,6 +280,10 @@ import { resolveThemeClass, applyStatusBar, applyTabBar, applyNavBar } from '../
 import { pickBinaryFile } from '../../utils/pickFile.js'
 import { parseXls } from '../../utils/xls.js'
 import { inspectXlsTimetable, guessStartMonday, buildZaobaImport } from '../../utils/xlsTimetable.js'
+import {
+  checkForUpdate, promptAndInstall, getCurrentVersion, isUpdateSupported, isReleaseApp,
+  isAutoCheckEnabled, setAutoCheckEnabled
+} from '../../services/updater.js'
 
 const SEM_COLORS = ['#4F7CD4', '#3FA7C4', '#43A98B', '#E0993F', '#E05E4F', '#A072D6']
 const WEEK_OPTIONS = Array.from({ length: 30 }, (_, i) => `第 ${i + 1} 周`)
@@ -274,6 +297,8 @@ export default {
       themeClass: 'theme-blue mode-light',
       semesters: [],
       currentSemesterId: null,
+      versionName: '',
+      autoCheck: true,
 
       accents: [
         { value: 'blue', color: '#007aff' },
@@ -363,6 +388,15 @@ export default {
       this.themeMode = user.themeMode || 'auto'
       this.accent = user.accent || 'blue'
 
+      // 版本号只用于「检查更新」那一行的展示
+      try {
+        const version = await getCurrentVersion()
+        this.versionName = version.versionName || ''
+      } catch (e) {
+        this.versionName = ''
+      }
+      this.autoCheck = isAutoCheckEnabled()
+
       const list = await listSemesters()
       this.semesters = list.map((s, i) => ({
         ...s,
@@ -390,6 +424,46 @@ export default {
     // 教务导入：选学校 → 在 WebView 里登录教务 → 适配脚本回传课程 → 落库
     goSchoolImport() {
       uni.navigateTo({ url: '/pages/import/import' })
+    },
+
+    onAutoCheckChange(e) {
+      const on = !!(e && e.detail && e.detail.value)
+      this.autoCheck = on
+      setAutoCheckEnabled(on)
+      uni.showToast({ title: on ? '已开启自动检查' : '已关闭自动检查', icon: 'none' })
+    },
+
+    // 手动检查更新：查 GitHub Release / update.json，有新版本就下载安装
+    async checkUpdate() {
+      if (!isUpdateSupported()) {
+        uni.showToast({ title: '当前环境不支持检查更新', icon: 'none' })
+        return
+      }
+      if (!isReleaseApp()) {
+        uni.showToast({ title: '调试基座不检查更新（请装正式包）', icon: 'none' })
+        return
+      }
+      uni.showLoading({ title: '检查中…', mask: true })
+      try {
+        const result = await checkForUpdate({ manual: true })
+        uni.hideLoading()
+        if (result.reason === 'network') {
+          uni.showToast({ title: '检查失败，请检查网络', icon: 'none' })
+          return
+        }
+        this.versionName = (result.current && result.current.versionName) || this.versionName
+        if (!result.hasUpdate) {
+          uni.showToast({ title: '已是最新版本 v' + this.versionName, icon: 'none' })
+          return
+        }
+        await promptAndInstall(result.latest, {
+          manual: true,
+          currentVersionName: result.current.versionName
+        })
+      } catch (error) {
+        uni.hideLoading()
+        uni.showToast({ title: '检查更新失败', icon: 'none' })
+      }
     },
 
     /* ---- 昵称 ---- */

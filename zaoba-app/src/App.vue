@@ -1,5 +1,6 @@
 <script>
 import { initDatabase } from './services/database.js'
+import { autoCheckUpdate, promptAndInstall, isUpdateSupported } from './services/updater.js'
 
 export default {
   async onLaunch() {
@@ -16,6 +17,25 @@ export default {
       }
     } catch (e) {
       /* 不支持则忽略 */
+    }
+
+    // 启动后静默检查更新：12 小时才查一次，只有真的有新版才弹窗；
+    // 调试基座 / H5 里 isUpdateSupported() 为 false，直接跳过。
+    if (isUpdateSupported()) {
+      setTimeout(async () => {
+        try {
+          const result = await autoCheckUpdate()
+          if (result && result.hasUpdate && !result.skipped) {
+            await promptAndInstall(result.latest, {
+              manual: false,
+              currentVersionName: result.current.versionName
+            })
+          }
+        } catch (error) {
+          // 更新检查失败不影响正常使用，静默
+          console.warn('检查更新失败', error)
+        }
+      }, 2500)
     }
   }
 }

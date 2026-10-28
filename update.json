@@ -1,0 +1,17 @@
+{
+    "versionName":  "1.2.0",
+    "versionCode":  120,
+    "releaseTag":  "v1.2.0",
+    "releasePage":  "https://github.com/dzy1145/zaoba/releases/tag/v1.2.0",
+    "notes":  "- 新增自动检查更新：启动时静默检查（12 小时一次，可在「我的」关闭），有新版会提示，支持后台下载 + 校验 + 直接调系统安装\n- 「我的」页新增「检查更新」入口，可手动检查、显示当前版本\n- 继续保留教务导入（269 校适配）、课表按周次过滤、JSON / Excel 导入导出",
+    "apk":  {
+                "name":  "zaoba-v1.2.0-20261028.apk",
+                "size":  14858262,
+                "sha256":  "8a21eea7fad2e552f07cf039ca0b409a8b5f5f3af19b7ee50f0235880dae4114",
+                "urls":  [
+                             "https://github.com/dzy1145/zaoba/releases/download/v1.2.0/zaoba-v1.2.0-20261028.apk",
+                             "https://ghproxy.net/https://github.com/dzy1145/zaoba/releases/download/v1.2.0/zaoba-v1.2.0-20261028.apk",
+                             "https://gh-proxy.com/https://github.com/dzy1145/zaoba/releases/download/v1.2.0/zaoba-v1.2.0-20261028.apk"
+                         ]
+            }
+}
