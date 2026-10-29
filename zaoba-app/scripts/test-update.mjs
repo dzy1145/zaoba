@@ -1,5 +1,6 @@
-// 更新模块的回归：版本比较 / Release 归一化 / update.json 归一化 / 是否提示。
+// 更新模块的回归：版本比较 / Release 归一化 / update.json 归一化 / 是否提示 / 下载线路与权限判断。
 // 用法：bash scripts/run-test-update.sh
+import fs from 'node:fs'
 import {
   parseVersion,
   compareVersions,
@@ -7,6 +8,11 @@ import {
   normalizeRelease,
   normalizeManifest,
   shouldPrompt,
+  orderMirrorUrls,
+  formatSpeed,
+  looksLikePermissionError,
+  getCurrentVersion,
+  FALLBACK_VERSION,
   MANIFEST_URLS,
   RELEASE_API
 } from './_updater.mjs'
@@ -96,6 +102,35 @@ check('没有安装包不提示', shouldPrompt({ versionName: '1.3.0', apk: null
 check('清单镜像 3 路', MANIFEST_URLS.length, 3)
 check('镜像都指向 zaoba 仓库', MANIFEST_URLS.every((u) => u.indexOf('dzy1145/zaoba') >= 0), true)
 check('Release API 地址', RELEASE_API, 'https://api.github.com/repos/dzy1145/zaoba/releases/latest')
+
+// ---- 下载线路排序（上次成功的那条排最前）----
+const URLS = ['https://a.apk', 'https://b.apk', 'https://c.apk']
+check('没有历史时保持原顺序', orderMirrorUrls(URLS), URLS)
+globalThis.uni = { getStorageSync: () => 'https://b.apk' }
+check('上次成功的排最前', orderMirrorUrls(URLS), ['https://b.apk', 'https://a.apk', 'https://c.apk'])
+globalThis.uni = { getStorageSync: () => 'https://old.apk' }
+check('历史里的地址已不在清单里就忽略', orderMirrorUrls(URLS), URLS)
+check('空输入返回空数组', orderMirrorUrls(undefined), [])
+check('过滤空地址', orderMirrorUrls(['', 'https://a.apk', '  ']), ['https://a.apk'])
+delete globalThis.uni
+
+// ---- 速度文案 ----
+check('速度为 0 不显示', formatSpeed(0), '')
+check('字节', formatSpeed(500), '500 B/s')
+check('KB', formatSpeed(2048), '2 KB/s')
+check('MB 保留一位', formatSpeed(1572864), '1.5 MB/s')
+
+// ---- 安装权限判断（各家 ROM 文案不同，必须宽匹配）----
+check('INSTALL_FAILED 判为权限问题', looksLikePermissionError({ message: 'INSTALL_FAILED_USER_RESTRICTED' }), true)
+check('permission denied 判为权限问题', looksLikePermissionError({ message: 'Permission denied' }), true)
+check('中文「未知来源」判为权限问题', looksLikePermissionError({ message: '禁止未知来源' }), true)
+check('签名不一致不是权限问题', looksLikePermissionError({ message: '签名校验失败' }), false)
+check('空错误不误判', looksLikePermissionError(null), false)
+
+// ---- 兜底版本必须跟 manifest 同步（改版本号只改一处的坑）----
+const manifestJson = JSON.parse(fs.readFileSync(new URL('../src/manifest.json', import.meta.url), 'utf8'))
+check('FALLBACK_VERSION 与 manifest.versionName 一致', FALLBACK_VERSION, manifestJson.versionName)
+check('非 App 环境返回兜底版本', await getCurrentVersion(), { versionName: FALLBACK_VERSION, versionCode: 0 })
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)

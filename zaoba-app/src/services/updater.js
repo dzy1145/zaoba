@@ -165,23 +165,33 @@ function requestJson(url) {
   })
 }
 
-// 当前安装的版本：plus.runtime.getProperty 是唯一在所有 Android 版本上都靠谱的取法
+// 当前安装的版本：App 端优先 plus.runtime.version（和 manifest 的 versionName 一致），
+// 拿不到再问 getProperty；H5 / 极端兜底用 FALLBACK_VERSION —— 发版时必须跟 manifest 一起改。
+export const FALLBACK_VERSION = '1.2.1'
+
 export function getCurrentVersion() {
   return new Promise((resolve) => {
     if (!isAppRuntime()) {
-      resolve({ versionName: '', versionCode: 0 })
+      resolve({ versionName: FALLBACK_VERSION, versionCode: 0 })
       return
     }
+    try {
+      const direct = String(plus.runtime.version || '')
+      if (direct) {
+        resolve({ versionName: direct, versionCode: 0 })
+        return
+      }
+    } catch (e) { /* 掉到 getProperty */ }
     try {
       const appid = plus.runtime.appid || ''
       plus.runtime.getProperty(appid, (info) => {
         resolve({
-          versionName: String((info && info.version) || ''),
+          versionName: String((info && info.version) || FALLBACK_VERSION),
           versionCode: parseInt((info && info.versionCode), 10) || 0
         })
       })
     } catch (e) {
-      resolve({ versionName: '', versionCode: 0 })
+      resolve({ versionName: FALLBACK_VERSION, versionCode: 0 })
     }
   })
 }
@@ -264,36 +274,121 @@ export function skipVersion(versionName) {
   writeStorage(KEY_SKIP_VERSION, String(versionName || ''))
 }
 
-// 下载 APK：plus.downloader 能拿进度，失败再试清单里的下一个地址
+// ---------- 下载 / 安装 ----------
+
+const KEY_MIRROR = 'updateMirrorUrl'
+const STALL_MS = 8000
+const DOWNLOAD_TIMEOUT = 20000
+
+// 上次成功的那条线路排最前（手机 5G 和 WiFi 的最优线路不一样，实测差很多）
+export function orderMirrorUrls(urls) {
+  const list = (urls || []).map((u) => String(u || '').trim()).filter(Boolean)
+  const last = String(readStorage(KEY_MIRROR) || '')
+  if (!last || list.indexOf(last) < 0) return list
+  return [last].concat(list.filter((u) => u !== last))
+}
+
+export function formatSpeed(bytesPerSec) {
+  const v = Number(bytesPerSec) || 0
+  if (v <= 0) return ''
+  if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB/s'
+  if (v >= 1024) return Math.round(v / 1024) + ' KB/s'
+  return Math.round(v) + ' B/s'
+}
+
+// 下载 APK：uni.downloadFile 能拿字节级进度；8 秒没有新字节就判卡死，自动换下一条线路。
+// 只靠 timeout 不行 —— 连接建立了但龟速不动时 timeout 不会触发。
 export function downloadApk(manifest, onProgress) {
   if (!isAppRuntime() || !manifest || !manifest.apk) {
     return Promise.reject(new Error('没有可下载的安装包'))
   }
-  const apk = manifest.apk
-  const urls = (apk.urls || []).filter(Boolean)
-  if (!urls.length) return Promise.reject(new Error('清单里没有下载地址'))
+  const candidates = orderMirrorUrls(manifest.apk.urls)
+  if (!candidates.length) return Promise.reject(new Error('清单里没有下载地址'))
 
-  const tryOne = (url) => new Promise((resolve, reject) => {
-    const fileName = '_downloads/zaoba-' + manifest.versionName + '.apk'
+  return new Promise((resolve, reject) => {
+    let index = 0
     let task = null
-    try {
-      task = plus.downloader.createDownload(url, { filename: fileName, timeout: 180, retry: 1 }, (done, status) => {
-        if (status === 200 && done && done.filename) resolve(done.filename)
-        else reject(new Error('下载失败（' + status + '）'))
-      })
-    } catch (e) {
-      reject(new Error('创建下载任务失败：' + e.message))
-      return
-    }
-    task.addEventListener('statechanged', (t) => {
-      if (t.state === 3 && onProgress && t.totalSize > 0) {
-        onProgress(Math.min(99, Math.round((t.downloadedSize / t.totalSize) * 100)))
-      }
-    })
-    task.start()
-  })
+    let watchdog = null
+    let stalled = false
+    let lastReceived = 0
+    let lastTick = Date.now()
+    let speed = 0
 
-  return urls.reduce((prev, url) => prev.catch(() => tryOne(url)), Promise.reject(new Error('no-url')))
+    const stop = () => {
+      if (watchdog) { clearInterval(watchdog); watchdog = null }
+      if (task) {
+        try { task.abort() } catch (e) { /* 已经结束了 */ }
+        task = null
+      }
+    }
+
+    const tryNext = (reason) => {
+      stop()
+      if (index >= candidates.length) {
+        reject(new Error(reason || '所有下载线路都失败了'))
+        return
+      }
+      const url = candidates[index]
+      index += 1
+      lastReceived = 0
+      lastTick = Date.now()
+      stalled = false
+      speed = 0
+
+      task = uni.downloadFile({
+        url,
+        timeout: DOWNLOAD_TIMEOUT,
+        success: (res) => {
+          stop()
+          if (!res || res.statusCode !== 200 || !res.tempFilePath) {
+            tryNext('HTTP ' + ((res && res.statusCode) || 0))
+            return
+          }
+          writeStorage(KEY_MIRROR, url)
+          resolve(res.tempFilePath)
+        },
+        fail: (err) => {
+          stop()
+          tryNext((err && err.errMsg) || '下载失败')
+        }
+      })
+
+      if (task && typeof task.onProgressUpdate === 'function') {
+        task.onProgressUpdate((res) => {
+          const now = Date.now()
+          const total = res.totalBytesExpectedToWrite || 0
+          const received = res.totalBytesWritten || 0
+          if (!total) return
+          // 每 200ms 更新一次速度，避免进度回调太密时抖动
+          if (now - lastTick > 200) {
+            speed = ((received - lastReceived) / (now - lastTick)) * 1000
+            lastTick = now
+            lastReceived = received
+          }
+          if (onProgress) {
+            const percent = res.progress != null ? res.progress : (received / total) * 100
+            onProgress({
+              percent: Math.min(99, Math.round(percent)),
+              received,
+              total,
+              bytesPerSec: speed
+            })
+          }
+        })
+      }
+
+      // 看门狗：一直没有新字节就换线路（不能只靠 timeout）
+      watchdog = setInterval(() => {
+        if (stalled) return
+        if (Date.now() - lastTick > STALL_MS) {
+          stalled = true
+          tryNext('线路卡住，换一条')
+        }
+      }, 1500)
+    }
+
+    tryNext('')
+  })
 }
 
 // 校验下载到的文件：有 sha256 就必须一致，否则拒绝安装
@@ -314,7 +409,7 @@ export function verifyApk(path, manifest) {
   })
 }
 
-// 调系统安装器。Android 8+ 需要「安装未知应用」权限，失败时给可操作的提示
+// 调系统安装器。Android 一定会弹一次「要安装此应用吗」，这是系统限制，App 无权跳过。
 export function installApk(path) {
   return new Promise((resolve, reject) => {
     if (!isAppRuntime()) { reject(new Error('当前环境不支持安装')); return }
@@ -322,6 +417,30 @@ export function installApk(path) {
       reject(new Error((err && (err.message || err.code)) || '安装失败'))
     })
   })
+}
+
+// 打开「安装未知应用」授权页（Android 8+ 必须给这个权限才能装）；部分 ROM 没有这个页面，返回 false
+export function openInstallPermissionSettings() {
+  if (!isAppRuntime()) return false
+  try {
+    const main = plus.android.runtimeMainActivity()
+    const Intent = plus.android.importClass('android.content.Intent')
+    const Uri = plus.android.importClass('android.net.Uri')
+    const intent = new Intent(
+      'android.settings.MANAGE_UNKNOWN_APP_SOURCES',
+      Uri.parse('package:' + main.getPackageName())
+    )
+    main.startActivity(intent)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+// 安装失败是不是「没给安装权限」——各家 ROM 文案不同，只能宽匹配
+export function looksLikePermissionError(error) {
+  const text = String((error && (error.message || error.errMsg || error.code)) || '')
+  return /permission|denied|not allowed|unknown|INSTALL|权限|未知来源|不允许/i.test(text)
 }
 
 // 启动时静默检查（节流由 checkForUpdate 内部处理），有新版才打扰用户
@@ -401,8 +520,10 @@ export async function promptAndInstall(latest, opts = {}) {
 
   let path = ''
   try {
-    path = await downloadApk(latest, (percent) => {
-      try { plus.nativeUI.showWaiting('下载中 ' + percent + '%', { padlock: true }) } catch (e) { /* 忽略 */ }
+    path = await downloadApk(latest, (progress) => {
+      const speedText = formatSpeed(progress.bytesPerSec)
+      const text = '下载中 ' + progress.percent + '%' + (speedText ? ' · ' + speedText : '')
+      try { plus.nativeUI.showWaiting(text, { padlock: true }) } catch (e) { /* 忽略 */ }
     })
   } catch (e) {
     if (waiting) { try { plus.nativeUI.closeWaiting() } catch (err) { /* 忽略 */ } }
@@ -426,13 +547,30 @@ export async function promptAndInstall(latest, opts = {}) {
     return 'installed'
   } catch (e) {
     const msg = String((e && e.message) || '安装失败')
-    // 常见原因：没开「安装未知应用」权限 / 签名不一致 / 安装包损坏
-    const isPermission = /permission|denied|Permission|INSTALL/i.test(msg)
+    // 没给「安装未知应用」权限时，直接把人送到授权页，比让他自己去翻设置快得多
+    if (looksLikePermissionError(e)) {
+      uni.showModal({
+        title: '还差一步授权',
+        content: '需要允许早八「安装未知应用」，才能装上新版本。点「去授权」跳到系统设置，打开开关后回来再点一次检查更新。',
+        confirmText: '去授权',
+        cancelText: '知道了',
+        success: (res) => {
+          if (!res.confirm) return
+          const jumped = openInstallPermissionSettings()
+          if (!jumped) {
+            uni.showModal({
+              title: '手动开一下',
+              content: '请到「设置 → 应用 → 早八 → 安装未知应用」里允许。',
+              showCancel: false
+            })
+          }
+        }
+      })
+      return 'failed'
+    }
     uni.showModal({
       title: '安装没有成功',
-      content: isPermission
-        ? '系统拦截了安装。请到「设置 → 应用 → 早八 → 安装未知应用」里允许后再试，或手动到 Release 页下载安装。'
-        : '安装失败：' + msg + '\n可以到 Release 页手动下载安装。',
+      content: '安装失败：' + msg + '\n可以到 Release 页手动下载安装。',
       confirmText: '去下载页',
       cancelText: '知道了',
       success: (res) => {
