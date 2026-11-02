@@ -1,18 +1,18 @@
 {
-    "versionName":  "1.2.1",
-    "versionCode":  121,
-    "releaseTag":  "v1.2.1",
-    "releasePage":  "https://github.com/dzy1145/zaoba/releases/tag/v1.2.1",
-    "notes":  "- 下载更稳：线路卡住 8 秒没有新数据就自动换线（直连 / ghfast / ghproxy / gh-proxy），并记住上次最快的线路\n- 安装被拦时，弹窗可直接跳到系统「安装未知应用」授权页，不用自己翻设置\n- 下载时显示实时速度（KB/s 或 MB/s），不再只有百分比",
+    "versionName":  "1.2.2",
+    "versionCode":  122,
+    "releaseTag":  "v1.2.2",
+    "releasePage":  "https://github.com/dzy1145/zaoba/releases/tag/v1.2.2",
+    "notes":  "- 修复教务导入：选学校后教务页面根本没打开（WebView 窗口建错方式），只停在「已注入适配脚本」的问题\n- 修复导入中途静默卡住：桥的分片消息里 base64 的 + / = 被 URL 规范化后解码失败、消息被丢弃\n- 教务页面打不开时现在会明确报错（含地址），不再无声无息；取消导入也有提示",
     "apk":  {
-                "name":  "zaoba-v1.2.1-20261029.apk",
-                "size":  14858958,
-                "sha256":  "507a6e42fbb2e52419cf99931718cdb5e444b0df8a271385fe8a3aa8d2f98885",
+                "name":  "zaoba-v1.2.2-20261103.apk",
+                "size":  14851170,
+                "sha256":  "a7d7524e8e78c3f6b3a705303549b5de4c6a5e3cf38b55993c418a10bc5b6625",
                 "urls":  [
-                             "https://github.com/dzy1145/zaoba/releases/download/v1.2.1/zaoba-v1.2.1-20261029.apk",
-                             "https://ghfast.top/https://github.com/dzy1145/zaoba/releases/download/v1.2.1/zaoba-v1.2.1-20261029.apk",
-                             "https://ghproxy.net/https://github.com/dzy1145/zaoba/releases/download/v1.2.1/zaoba-v1.2.1-20261029.apk",
-                             "https://gh-proxy.org/https://github.com/dzy1145/zaoba/releases/download/v1.2.1/zaoba-v1.2.1-20261029.apk"
+                             "https://github.com/dzy1145/zaoba/releases/download/v1.2.2/zaoba-v1.2.2-20261103.apk",
+                             "https://ghfast.top/https://github.com/dzy1145/zaoba/releases/download/v1.2.2/zaoba-v1.2.2-20261103.apk",
+                             "https://ghproxy.net/https://github.com/dzy1145/zaoba/releases/download/v1.2.2/zaoba-v1.2.2-20261103.apk",
+                             "https://gh-proxy.org/https://github.com/dzy1145/zaoba/releases/download/v1.2.2/zaoba-v1.2.2-20261103.apk"
                          ]
             }
 }

@@ -156,7 +156,9 @@ export default {
       } catch (error) {
         this.busy = false
         const msg = (error && error.message) ? error.message : '导入失败'
-        if (msg !== '已取消') {
+        if (msg === '已取消') {
+          uni.showToast({ title: '已取消导入', icon: 'none' })
+        } else {
           uni.showModal({ title: '导入未完成', content: msg, showCancel: false })
         }
       }

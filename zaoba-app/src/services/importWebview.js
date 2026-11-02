@@ -17,6 +17,7 @@ const SCHEME = 'shiguang-import://'
 const CHUNK = 1800
 const INJECT_DELAY = 150
 const VALIDATOR_TIMEOUT = 4000
+const PAGE_LOAD_TIMEOUT = 25000
 
 // 拾光原版桥的 JS 端实现（与 shiguangschedule 的 JS_BRIDGE_INIT 等价），
 // 只把「怎么发给原生」换成早八的实现：_shiguangNativeBridge.postMessage 由宿主注入。
@@ -131,7 +132,7 @@ export function buildShimScript() {
     '  var sid="m"+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);' +
     '  var i=0;function step(){if(i>=total){return}' +
     '    var d=enc.substr(i*' + CHUNK + ',' + CHUNK + ');' +
-    '    try{window.location.href="' + SCHEME + 'msg?sid="+sid+"&i="+i+"&n="+total+"&d="+d}catch(e){}' +
+    '    try{window.location.href="' + SCHEME + 'msg?sid="+sid+"&i="+i+"&n="+total+"&d="+encodeURIComponent(d)}catch(e){}' +
     '    i++;setTimeout(step,25)}' +
     '  step()}' +
     'window._shiguangNativeBridge={postMessage:function(m){sqSend(m)}};' +
@@ -191,6 +192,7 @@ export function runAdapterImport(opts) {
     let settled = false
     let injectTimer = null
     let pageUrl = ''
+    let didInject = false
     let validatorSeq = 0
     const validatorWaiters = {}
     const chunkBuffer = new Map()
@@ -246,7 +248,9 @@ export function runAdapterImport(opts) {
       const sid = get('sid')
       const index = parseInt(get('i'), 10)
       const total = parseInt(get('n'), 10)
-      const data = get('d')
+      // shim 侧做了 encodeURIComponent；平台若已解码，这里对纯 base64 是 no-op，两种情况都安全
+      let data = get('d')
+      try { data = decodeURIComponent(data) } catch (e) { /* 保持原样 */ }
       if (!sid || !isFinite(index) || !isFinite(total) || !data) return
 
       let bucket = chunkBuffer.get(sid)
@@ -427,7 +431,9 @@ export function runAdapterImport(opts) {
           wv.evalJS(shim)
           wv.evalJS(BRIDGE_JS)
           wv.evalJS(adapterGuard)
-          emit({ type: 'injected', message: '已注入适配脚本' })
+          didInject = true
+          const host = (pageUrl.match(/^https?:\/\/([^/]+)/i) || [])[1] || ''
+          emit({ type: 'injected', message: '已注入适配脚本' + (host ? '（' + host + '）' : '') })
         } catch (e) {
           emit({ type: 'error', message: '注入脚本失败：' + e.message })
         }
@@ -441,34 +447,64 @@ export function runAdapterImport(opts) {
     }
 
     // ---------- 建窗口 ----------
+    // 注意：不要用 plus.webview.currentWebview().append(wv)。
+    // uni-app 的页面自己就是 plus.webview.create 建出来的窗口，append() 是给 nvue 容器塞子窗口用的；
+    // 往页面窗口上挂子窗口再 show()，Android 上会出现「窗口存在、能加载、evalJS 也生效，但看不见」
+    // —— 表现就是只打印「已注入适配脚本」，屏幕上什么也没有。
+    // 正确姿势：独立窗口 + show()，靠 titleNView 的返回键关闭。
     try {
       const style = {
+        left: '0px',
+        right: '0px',
         top: '0px',
         bottom: '0px',
+        zindex: 99,
         render: 'always',
         titleNView: {
           type: 'default',
           titleText: '教务导入 · ' + (schoolName || adapter.name || ''),
-          titleSize: '17px',
-          titleColor: '#17181c',
-          backgroundColor: '#ffffff',
           autoBackButton: true
         }
       }
       wv = plus.webview.create(adapter.importUrl, id, style)
+      if (!wv) throw new Error('创建窗口失败')
+
       wv.addEventListener('loaded', () => {
-        try { pageUrl = wv.getURL ? wv.getURL() : '' } catch (e) { pageUrl = '' }
+        try { pageUrl = wv.getURL ? String(wv.getURL() || '') : '' } catch (e) { pageUrl = '' }
+        // about:blank / 明确的错误页不注入（否则会出现「注入了但页面还没打开」的假象）；
+        // getURL() 取不到时（部分内核在 loaded 回调里返回空串）当作未知页照常注入。
+        if (pageUrl && !/^https?:\/\//i.test(pageUrl)) return
         onLoaded()
+      })
+      wv.addEventListener('show', () => {
+        emit({ type: 'open', message: '已打开教务系统' })
+      })
+      wv.addEventListener('error', (err) => {
+        const code = (err && (err.code || err.message)) || ''
+        emit({ type: 'error', message: '页面加载失败' + (code ? '（' + code + '）' : '') })
       })
       wv.addEventListener('close', onClose)
       wv.overrideUrlLoading(
         { mode: 'reject', match: '^shiguang-import://', effect: 'instant' },
         (result) => onIntercept(result)
       )
-      plus.webview.currentWebview().append(wv)
-      // append 之后子窗口已经显示了；show 只是保险，失败不影响流程
-      try { wv.show('slide-in-right', 200) } catch (e) { /* 忽略动画失败 */ }
-      emit({ type: 'open', message: '已打开教务系统' })
+
+      try {
+        wv.show('slide-in-right', 250, () => {
+          emit({ type: 'open', message: '已打开教务系统' })
+        })
+      } catch (e) {
+        emit({ type: 'error', message: '窗口没能显示：' + (e && e.message ? e.message : e) })
+      }
+
+      // 看门狗：一段时间内没进到真正的教务页，就把原因说出来，别让界面一直卡着
+      setTimeout(() => {
+        if (settled || !wv) return
+        if (!didInject) {
+          emit({ type: 'error', message: '教务页面没能打开' })
+          abort('教务页面打不开（地址：' + adapter.importUrl + '）。如果是 http:// 开头的学校，可能是系统拦了明文传输。')
+        }
+      }, PAGE_LOAD_TIMEOUT)
     } catch (e) {
       settled = true
       cleanup()

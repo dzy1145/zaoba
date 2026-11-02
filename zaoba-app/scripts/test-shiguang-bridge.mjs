@@ -62,7 +62,9 @@ function collect(urls) {
     const sid = get('sid')
     const i = parseInt(get('i'), 10)
     const n = parseInt(get('n'), 10)
-    const d = get('d')
+    // shim 现在对分片做了 encodeURIComponent（base64 的 + / = 会被 WebView 规范化成 %2B %2F %3D）
+    let d = get('d')
+    try { d = decodeURIComponent(d) } catch (e) { /* 原样 */ }
     let bucket = buckets.get(sid)
     if (!bucket) { bucket = { n, parts: {} }; buckets.set(sid, bucket) }
     bucket.parts[i] = d
@@ -119,6 +121,7 @@ function collect(urls) {
   const got = collect(urls)
   check('大消息被切成多片', got.length, 1)
   check('分片数量 > 1', got[0].total > 1, true)
+  check('分片 URL 里没有裸的 + 号（已被 percent-encode）', urls.every((u) => !/[+]/.test(u.split('&d=')[1] || '')), true)
   check('单片 base64 不超过分片大小', got[0].size <= got[0].total * BRIDGE_CHUNK_SIZE, true)
   const back = JSON.parse(JSON.parse(got[0].msg.payload).coursesJsonString)
   check('还原后课程数一致', back.length, 180)
