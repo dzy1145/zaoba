@@ -2,8 +2,8 @@
     "name" : "早八",
     "appid" : "__UNI__1A56EB1",
     "description" : "大学课表应用",
-    "versionName" : "1.2.2",
-    "versionCode" : "122",
+    "versionName" : "1.2.3",
+    "versionCode" : "123",
     "transformPx" : false,
     "app-plus" : {
         "usingComponents" : true,

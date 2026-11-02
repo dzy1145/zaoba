@@ -108,6 +108,7 @@ export function normalizeManifest(raw) {
       ? {
         name: String(apk.name || 'zaoba-' + versionName + '.apk'),
         size: Number(apk.size) || 0,
+        md5: String(apk.md5 || '').replace(/^md5:/i, '').toLowerCase(),
         sha256: String(apk.sha256 || '').replace(/^sha256:/i, '').toLowerCase(),
         urls: clean
       }
@@ -167,7 +168,7 @@ function requestJson(url) {
 
 // 当前安装的版本：App 端优先 plus.runtime.version（和 manifest 的 versionName 一致），
 // 拿不到再问 getProperty；H5 / 极端兜底用 FALLBACK_VERSION —— 发版时必须跟 manifest 一起改。
-export const FALLBACK_VERSION = '1.2.2'
+export const FALLBACK_VERSION = '1.2.3'
 
 export function getCurrentVersion() {
   return new Promise((resolve) => {
@@ -391,23 +392,62 @@ export function downloadApk(manifest, onProgress) {
   })
 }
 
-// 校验下载到的文件：有 sha256 就必须一致，否则拒绝安装
-export function verifyApk(path, manifest) {
-  const expect = manifest && manifest.apk && manifest.apk.sha256
-  if (!expect) return Promise.resolve(true)
-  return new Promise((resolve, reject) => {
-    uni.getFileInfo({
-      filePath: path,
-      digestAlgorithm: 'sha256',
-      success: (res) => {
-        const actual = String(res.digest || '').toLowerCase()
-        if (actual && actual === String(expect).toLowerCase()) resolve(true)
-        else reject(new Error('安装包校验不一致'))
-      },
-      fail: (err) => reject(new Error('读取安装包失败：' + ((err && err.errMsg) || '')))
-    })
+// 用哪个摘要校验：md5 优先（uni.getFileInfo 在 App 端只保证 md5/sha1，
+// 传 sha256 会直接失败 —— 2026-11-03 真机就是这么报「读取安装包失败」的）
+export function chooseDigest(manifest) {
+  const apk = (manifest && manifest.apk) || {}
+  if (apk.md5) return { algorithm: 'md5', expected: String(apk.md5).toLowerCase() }
+  if (apk.sha256) return { algorithm: 'sha256', expected: String(apk.sha256).toLowerCase() }
+  return null
+}
+
+// 文件大小（摘要拿不到时的兜底校验）
+function localFileSize(path) {
+  return new Promise((resolve) => {
+    try {
+      plus.io.resolveLocalFileSystemURL(path, (entry) => {
+        entry.getMetadata((meta) => resolve(Number(meta.size) || 0), () => resolve(0))
+      }, () => resolve(0))
+    } catch (e) {
+      resolve(0)
+    }
   })
 }
+
+// 校验下载到的文件。顺序：md5 → sha256（拿不到算法就跳过）→ 文件大小。
+// 摘要一致才装；大小明显不对说明没下完，也拒绝。签名由系统安装器把关。
+export async function verifyApk(path, manifest) {
+  const apk = (manifest && manifest.apk) || {}
+  const choice = chooseDigest(manifest)
+
+  if (choice) {
+    const got = await new Promise((resolve) => {
+      uni.getFileInfo({
+        filePath: path,
+        digestAlgorithm: choice.algorithm,
+        success: (res) => resolve(String(res.digest || '').toLowerCase()),
+        fail: () => resolve('') // 算法不支持 / 读不到，都当「没算出摘要」
+      })
+    })
+    if (got) {
+      if (got !== choice.expected) {
+        throw new Error('安装包校验不一致（' + choice.algorithm + '），已停止安装，请重试')
+      }
+      return true
+    }
+  }
+
+  const expectSize = Number(apk.size) || 0
+  if (expectSize) {
+    const size = await localFileSize(path)
+    if (size && Math.abs(size - expectSize) > 4096) {
+      throw new Error('安装包大小不对（' + size + ' ≠ ' + expectSize + '），可能没下载完整，请重试')
+    }
+  }
+  return true
+}
+
+// 校验下载到的文件：不再用 sha256-only（App 端 uni.getFileInfo 不支持 sha256）
 
 // 调系统安装器。Android 一定会弹一次「要安装此应用吗」，这是系统限制，App 无权跳过。
 export function installApk(path) {

@@ -9,6 +9,7 @@ import {
   normalizeManifest,
   shouldPrompt,
   orderMirrorUrls,
+  chooseDigest,
   formatSpeed,
   looksLikePermissionError,
   getCurrentVersion,
@@ -98,6 +99,12 @@ check('自动检查跳过同版本', shouldPrompt({ versionName: '1.2.0', apk: {
 check('自动检查遇到其他版本要提示', shouldPrompt({ versionName: '1.3.0', apk: {} }, '1.2.0', false), true)
 check('没有安装包不提示', shouldPrompt({ versionName: '1.3.0', apk: null }, '', true), false)
 
+// ---- 摘要算法选择（App 端 uni.getFileInfo 只认 md5/sha1，传 sha256 会直接失败）----
+check('有 md5 就用 md5', chooseDigest({ apk: { md5: 'AB', sha256: 'cd' } }), { algorithm: 'md5', expected: 'ab' })
+check('只有 sha256 才用 sha256', chooseDigest({ apk: { sha256: 'CD' } }), { algorithm: 'sha256', expected: 'cd' })
+check('都没有返回 null（退回大小校验）', chooseDigest({ apk: {} }), null)
+check('没有 apk 返回 null', chooseDigest(null), null)
+check('清单里的 md5 前缀会被去掉', normalizeManifest({ versionName: '1.0.0', apk: { urls: ['u'], md5: 'MD5:AA', sha256: 'SHA256:BB' } }).apk.md5, 'aa')
 // ---- 常量检查（别把仓库地址写错） ----
 check('清单镜像 3 路', MANIFEST_URLS.length, 3)
 check('镜像都指向 zaoba 仓库', MANIFEST_URLS.every((u) => u.indexOf('dzy1145/zaoba') >= 0), true)
