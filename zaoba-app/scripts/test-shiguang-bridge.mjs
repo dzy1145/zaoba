@@ -25,17 +25,17 @@ function check(name, actual, expected) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // 分片是 ack 串行发的：等到 URL 数量稳定下来再断言（比死等更稳）
-async function settle(urls, timeoutMs = 30000) {
+async function settle(list, timeoutMs = 30000) {
   let last = -1
   let stable = 0
   const t0 = Date.now()
   while (Date.now() - t0 < timeoutMs) {
     await sleep(300)
-    if (urls.length === last && urls.length > 0) {
+    if (list.length === last && list.length > 0) {
       stable += 1
       if (stable >= 3) return
     } else {
-      last = urls.length
+      last = list.length
       stable = 0
     }
   }
@@ -81,22 +81,17 @@ function createPage() {
   return { sandbox, urls, titles, setUrl: (u) => { currentUrl = String(u) } }
 }
 
-// 把拦到的 URL 按 sid 拼回去（等同宿主 onIntercept 的逻辑）
-function collect(urls) {
+// 把标题通道的分片按 sid 拼回去（等同宿主 startTitleWatcher 的逻辑）
+function collect(titles) {
   const buckets = new Map()
-  for (const url of urls) {
-    if (!url.startsWith(BRIDGE_SCHEME)) continue
-    const q = url.slice(BRIDGE_SCHEME.length)
-    const get = (k) => {
-      const m = q.match(new RegExp('[?&]' + k + '=([^&]*)'))
-      return m ? m[1] : ''
-    }
-    const sid = get('sid')
-    const i = parseInt(get('i'), 10)
-    const n = parseInt(get('n'), 10)
-    // shim 现在对分片做了 encodeURIComponent（base64 的 + / = 会被 WebView 规范化成 %2B %2F %3D）
-    let d = get('d')
-    try { d = decodeURIComponent(d) } catch (e) { /* 原样 */ }
+  for (const title of titles) {
+    if (typeof title !== 'string' || title.indexOf('SQMSG|') !== 0) continue
+    const parts = title.split('|')
+    const sid = parts[1]
+    const i = parseInt(parts[2], 10)
+    const n = parseInt(parts[3], 10)
+    const d = parts.slice(4).join('|')
+    if (!sid || !isFinite(i) || !isFinite(n) || !d) continue
     let bucket = buckets.get(sid)
     if (!bucket) { bucket = { n, parts: {} }; buckets.set(sid, bucket) }
     bucket.parts[i] = d
@@ -109,10 +104,9 @@ function collect(urls) {
   }
   return out
 }
-
 // ---- 1. 桥挂载 + 一次小消息 ----
 {
-  const { sandbox, urls } = createPage()
+  const { sandbox, titles } = createPage()
   vm.runInContext(buildShimScript(), sandbox)
   vm.runInContext(BRIDGE_JS, sandbox)
 
@@ -122,7 +116,7 @@ function collect(urls) {
 
   const promise = sandbox.window.shiguangBridgePromise.saveImportedCourses('[]')
   await sleep(120)
-  const got = collect(urls)
+  const got = collect(titles)
   check('小消息只有 1 个分片', got.length, 1)
   check('消息 action 正确', got[0].msg.action, 'saveImportedCourses')
   check('payload 是二次编码的字符串', JSON.parse(got[0].msg.payload).coursesJsonString, '[]')
@@ -133,7 +127,7 @@ function collect(urls) {
 
 // ---- 2. 大消息分片 + 字节级还原（含中文/emoji） ----
 {
-  const { sandbox, urls } = createPage()
+  const { sandbox, titles } = createPage()
   vm.runInContext(buildShimScript(), sandbox)
   vm.runInContext(BRIDGE_JS, sandbox)
 
@@ -148,12 +142,12 @@ function collect(urls) {
   }))
   const payload = JSON.stringify(courses)
   sandbox.window.shiguangBridgePromise.saveImportedCourses(payload)
-  await settle(urls)
+  await settle(titles)
 
-  const got = collect(urls)
+  const got = collect(titles)
   check('大消息被切成多片', got.length, 1)
   check('分片数量 > 1', got[0].total > 1, true)
-  check('分片 URL 里没有裸的 + 号（已被 percent-encode）', urls.every((u) => !/[+]/.test(u.split('&d=')[1] || '')), true)
+  check('标题里的分片是合法 base64', titles.filter((x) => x.indexOf('SQMSG|') === 0).every((x) => /^[A-Za-z0-9+/=]*$/.test(x.split('|').slice(4).join('|'))), true)
   check('单片 base64 不超过分片大小', got[0].size <= got[0].total * BRIDGE_CHUNK_SIZE, true)
   const back = JSON.parse(JSON.parse(got[0].msg.payload).coursesJsonString)
   check('还原后课程数一致', back.length, 180)
@@ -163,7 +157,7 @@ function collect(urls) {
 
 // ---- 3. 校验函数回传 ----
 {
-  const { sandbox, urls } = createPage()
+  const { sandbox, titles } = createPage()
   vm.runInContext(buildShimScript(), sandbox)
   vm.runInContext(BRIDGE_JS, sandbox)
   sandbox.window.validYear = (input) => (/^[0-9]{4}$/.test(input) ? false : '请输入 4 位年份')
@@ -171,7 +165,7 @@ function collect(urls) {
   sandbox.window.__sqRunValidator('v1', 'validYear', '2026')
   sandbox.window.__sqRunValidator('v2', 'validYear', '26')
   await sleep(200)
-  const results = collect(urls).map((x) => x.msg).filter((m) => m.action === '__validatorResult')
+  const results = collect(titles).map((x) => x.msg).filter((m) => m.action === '__validatorResult')
   const byId = {}
   results.forEach((m) => { byId[m.id] = m.result })
   check('校验通过返回 false', byId.v1, false)
@@ -180,7 +174,7 @@ function collect(urls) {
 
 // ---- 4. 适配脚本同一 URL 只跑一次；换页（站内跳转）要能再跑一次 + 异常不炸宿主 ----
 {
-  const { sandbox, urls, setUrl } = createPage()
+  const { sandbox, titles, setUrl } = createPage()
   vm.runInContext(buildShimScript(), sandbox)
   vm.runInContext(BRIDGE_JS, sandbox)
 

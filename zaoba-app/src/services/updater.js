@@ -168,7 +168,7 @@ function requestJson(url) {
 
 // 当前安装的版本：App 端优先 plus.runtime.version（和 manifest 的 versionName 一致），
 // 拿不到再问 getProperty；H5 / 极端兜底用 FALLBACK_VERSION —— 发版时必须跟 manifest 一起改。
-export const FALLBACK_VERSION = '1.2.6'
+export const FALLBACK_VERSION = '1.2.8'
 
 export function getCurrentVersion() {
   return new Promise((resolve) => {

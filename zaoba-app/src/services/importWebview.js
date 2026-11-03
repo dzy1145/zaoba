@@ -143,7 +143,7 @@ export function buildShimScript() {
     '    var idx=i;var chunk=enc.substr(idx*' + CHUNK + ',' + CHUNK + ');var tries=0;' +
     '    function attempt(){' +
     '      tries++;' +
-    '      try{window.location.href="' + SCHEME + 'msg?sid="+sid+"&i="+idx+"&n="+total+"&d="+encodeURIComponent(chunk)}catch(e){}' +
+    '' +
     '      try{document.title="SQMSG|"+sid+"|"+idx+"|"+total+"|"+chunk}catch(e){}' +
     '      var waited=0;' +
     '      var t=setInterval(function(){' +
@@ -269,6 +269,40 @@ export function runAdapterImport(opts) {
 
     session = { abort }
 
+    // ---------- 原生对话框排队 ----------
+    // 教务窗口是独立原生窗口，uni.showModal/showActionSheet 画在被盖住的页面里，等于没弹。
+    // 所以全部用 plus.nativeUI，并且排队：上一个关掉后隔 250ms 再开下一个，
+    // 否则连着弹出时后一个会被系统丢掉（真机表现就是「选完学年就卡住」）。
+    let dialogChain = Promise.resolve()
+    function queueDialog(open) {
+      const prev = dialogChain
+      let release = null
+      dialogChain = new Promise((r) => { release = r })
+      return prev.then(() => open()).then(
+        (value) => { setTimeout(() => release && release(), 420); return value },
+        (err) => { setTimeout(() => release && release(), 420); throw err }
+      )
+    }
+
+    // 打开原生 UI：抛错就隔 350ms 重试，最多三次（不再回退到看不见的 uni.* UI）
+    function openNative(run) {
+      return new Promise((resolve) => {
+        let tries = 0
+        let settled = false
+        const finish = (value) => { if (!settled) { settled = true; resolve(value) } }
+        const attempt = () => {
+          tries += 1
+          try {
+            run(finish)
+          } catch (e) {
+            try { plus.nativeUI.toast('弹窗失败(' + tries + ')：' + (e && e.message ? e.message : e), { duration: 'short' }) } catch (err) { /* 忽略 */ }
+            if (tries < 3) setTimeout(attempt, 500)
+            else finish(null)
+          }
+        }
+        attempt()
+      })
+    }
     // ---------- 脚本 -> 原生：分片消息 ----------
     function onIntercept(result) {
       let url = ''
@@ -370,16 +404,12 @@ export function runAdapterImport(opts) {
     }
 
     function nativePrompt(title, tip, defaultText) {
-      return new Promise((res) => {
-        try {
-          plus.nativeUI.prompt(String(defaultText || ''), (r) => {
-            if (!r || r.index === 1) { res(null); return }
-            res(r.value === undefined ? '' : String(r.value))
-          }, String(title || ''), String(tip || ''), ['确定', '取消'])
-        } catch (e) {
-          res(null)
-        }
-      })
+      return queueDialog(() => openNative((finish) => {
+        plus.nativeUI.prompt(String(defaultText || ''), (r) => {
+          if (!r || r.index === 1) { finish(null); return }
+          finish(r.value === undefined ? '' : String(r.value))
+        }, String(title || ''), String(tip || ''), ['确定', '取消'])
+      }))
     }
 
     async function handleMessage(text) {
@@ -394,6 +424,8 @@ export function runAdapterImport(opts) {
       }
 
       const action = msg.action
+      // 临时诊断：把每条脚本消息用原生 toast 报出来（排查卡在哪一步用，定位完就删）
+      try { plus.nativeUI.toast('⇠ ' + action, { duration: 'short' }) } catch (e) { /* 忽略 */ }
       const callbackId = msg.callbackId
       let payload = null
       if (msg.payload) {
@@ -421,21 +453,9 @@ export function runAdapterImport(opts) {
         const content = String(payload.contentText || '')
         const confirmText = String(payload.confirmText || '确定')
         // 同样必须走原生弹窗：uni.showModal 画在页面里，会被教务窗口盖住
-        const ok = await new Promise((res) => {
-          try {
-            plus.nativeUI.confirm(content, (e) => res(!!e && e.index === 1), title, ['取消', confirmText])
-          } catch (e) {
-            uni.showModal({
-              title,
-              content,
-              showCancel: true,
-              cancelText: '取消',
-              confirmText,
-              success: (r) => res(!!r.confirm),
-              fail: () => res(false)
-            })
-          }
-        })
+        const ok = await queueDialog(() => openNative((finish) => {
+          plus.nativeUI.confirm(content, (e) => finish(!!e && e.index === 1), title, ['取消', confirmText])
+        }))
         resolveJs(callbackId, ok ? 'true' : 'false')
         return
       }
@@ -450,25 +470,17 @@ export function runAdapterImport(opts) {
         let items = []
         try { items = JSON.parse(payload.itemsJsonString || '[]') } catch (e) { items = [] }
         const title = String(payload.titleText || '')
-        const index = await new Promise((res) => {
-          if (!items.length) { res(null); return }
-          try {
-            plus.nativeUI.actionSheet({
-              title,
-              cancel: '取消',
-              buttons: items.map((x) => ({ title: String(x) }))
-            }, (e) => {
-              const i = e && typeof e.index === 'number' ? e.index : 0
-              res(i > 0 ? i - 1 : null) // 0 是取消，按钮从 1 开始
-            })
-          } catch (err) {
-            uni.showActionSheet({
-              itemList: items.map((x) => String(x)),
-              success: (r) => res(r.tapIndex),
-              fail: () => res(null)
-            })
-          }
-        })
+        const index = await queueDialog(() => openNative((finish) => {
+          if (!items.length) { finish(null); return }
+          plus.nativeUI.actionSheet({
+            title,
+            cancel: '取消',
+            buttons: items.map((x) => ({ title: String(x) }))
+          }, (e) => {
+            const i = e && typeof e.index === 'number' ? e.index : 0
+            finish(i > 0 ? i - 1 : null) // 0 是取消，按钮从 1 开始
+          })
+        }))
         resolveJs(callbackId, index === null ? 'null' : String(index))
         return
       }
