@@ -121,29 +121,51 @@ export const BRIDGE_JS = `(function() {
 
 let session = null
 
-// 注入到教务页里的「传输层」脚本：把消息分片、用自定义 scheme 发出去。
-// 抽成独立函数是为了能在 Node 里跑回归（见 scripts/test-shiguang-bridge.mjs）。
+// 注入到教务页里的「传输层」脚本：把消息分片后发回宿主。
+//
+// 两条通道同时发，宿主按 (sid, 分片号) 去重：
+//   1) location.href = 'shiguang-import://...'，宿主用 overrideUrlLoading 拦截 —— 传统做法，
+//      但在部分 Android WebView 上拦截不到（脚本的 showAlert 就永远送不出来）。
+//   2) document.title = 'SQMSG|sid|i|n|<base64>'，宿主轮询 wv.getTitle() 读取 —— 不依赖 URL 拦截，
+//      比较土但很稳。每片发完等宿主 evalJS 回的 ack（window.__sqAckIdx），1.5 秒没等到就重发一次。
 export function buildShimScript() {
   return '(function(){' +
     'if(window.__sqBridgeReady){return}window.__sqBridgeReady=true;' +
+    'window.__sqAckIdx=-1;' +
+    'var origTitle=document.title;' +
     'function sqB64(s){return btoa(unescape(encodeURIComponent(s)))}' +
-    'function sqSend(str){' +
+    'function sqSend(str){window.__sqLastMsg=str;' +
     '  var enc=sqB64(str);var total=Math.max(1,Math.ceil(enc.length/' + CHUNK + '));' +
     '  var sid="m"+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);' +
-    '  var i=0;function step(){if(i>=total){return}' +
-    '    var d=enc.substr(i*' + CHUNK + ',' + CHUNK + ');' +
-    '    try{window.location.href="' + SCHEME + 'msg?sid="+sid+"&i="+i+"&n="+total+"&d="+encodeURIComponent(d)}catch(e){}' +
-    '    i++;setTimeout(step,25)}' +
-    '  step()}' +
+    '  var i=0;' +
+    '  function sendOne(){' +
+    '    if(i>=total){try{document.title=origTitle}catch(e){}return}' +
+    '    var idx=i;var chunk=enc.substr(idx*' + CHUNK + ',' + CHUNK + ');var tries=0;' +
+    '    function attempt(){' +
+    '      tries++;' +
+    '      try{window.location.href="' + SCHEME + 'msg?sid="+sid+"&i="+idx+"&n="+total+"&d="+encodeURIComponent(chunk)}catch(e){}' +
+    '      try{document.title="SQMSG|"+sid+"|"+idx+"|"+total+"|"+chunk}catch(e){}' +
+    '      var waited=0;' +
+    '      var t=setInterval(function(){' +
+    '        if(window.__sqAckIdx>=idx){clearInterval(t);i=idx+1;sendOne();return}' +
+    '        waited+=120;' +
+    '        if(waited>=1500){clearInterval(t);if(tries<2){attempt()}else{i=idx+1;sendOne()}}' +
+    '      },120);' +
+    '    }' +
+    '    attempt()' +
+    '  }' +
+    '  sendOne()}' +
     'window._shiguangNativeBridge={postMessage:function(m){sqSend(m)}};' +
+    'window.__sqResend=function(){if(window.__sqLastMsg){sqSend(window.__sqLastMsg)}};' +
     'window.__sqRunValidator=function(id,fnName,input){var out=false;try{var fn=window[fnName];out=(typeof fn==="function")?fn(input):false}catch(e){out="校验出错："+e}' +
     '  sqSend(JSON.stringify({action:"__validatorResult",id:id,result:(out===undefined?"":out)}))};' +
     '})();'
 }
 
-// 把学校适配脚本包一层：同一页面只跑一次，异常不炸宿主，只 toast
+// 把学校适配脚本包一层：同一 URL 只跑一次（站内跳转/换页要允许再跑一次），异常不炸宿主，只 toast
 export function buildAdapterScript(script) {
-  return 'if(!window.__sqAdapterRan){window.__sqAdapterRan=true;try{' +
+  return 'var __sqU=(window.location&&window.location.href)||"";' +
+    'if(window.__sqAdapterUrl!==__sqU){window.__sqAdapterUrl=__sqU;try{' +
     '(function(){' + String(script || '') + '\n})();' +
     '}catch(e){window.shiguangBridge&&window.shiguangBridge.showToast&&window.shiguangBridge.showToast("适配脚本执行出错："+e)}}'
 }
@@ -199,15 +221,20 @@ export function runAdapterImport(opts) {
     let wv = null
     let settled = false
     let injectTimer = null
+    let urlTimer = null
+    let titleTimer = null
     let pageUrl = ''
     let didInject = false
     let validatorSeq = 0
     const validatorWaiters = {}
     const chunkBuffer = new Map()
+    const resendCount = {}
     const collected = { coursesJson: '', timeSlotsJson: '', configJson: '', comboScheduleJson: '' }
 
     function cleanup() {
       if (injectTimer) { clearTimeout(injectTimer); injectTimer = null }
+      if (urlTimer) { clearInterval(urlTimer); urlTimer = null }
+      if (titleTimer) { clearInterval(titleTimer); titleTimer = null }
       Object.keys(validatorWaiters).forEach((k) => {
         const w = validatorWaiters[k]
         delete validatorWaiters[k]
@@ -260,6 +287,14 @@ export function runAdapterImport(opts) {
       let data = get('d')
       try { data = decodeURIComponent(data) } catch (e) { /* 保持原样 */ }
       if (!sid || !isFinite(index) || !isFinite(total) || !data) return
+      acceptChunk(sid, index, total, data)
+    }
+
+    // 收到一个分片：攒够了一片一片拼回来；顺便回 ack 给脚本（title 通道靠它推进）
+    function acceptChunk(sid, index, total, data) {
+      if (wv) {
+        try { wv.evalJS('window.__sqAckIdx=' + index) } catch (e) { /* 页面可能已关闭 */ }
+      }
 
       let bucket = chunkBuffer.get(sid)
       if (!bucket) {
@@ -282,6 +317,21 @@ export function runAdapterImport(opts) {
         // base64 里混进 + / = 之外的字符时按原样尝试
         try { text = atob(raw) } catch (err) { return }
       }
+      // 拼出来却解析不了（分片在传输中丢了/被截断）→ 让脚本把最后一条消息重发，最多两次
+      try {
+        JSON.parse(text)
+      } catch (e) {
+        const tried = resendCount[sid] || 0
+        if (tried < 2) {
+          resendCount[sid] = tried + 1
+          try { wv.evalJS('window.__sqResend && window.__sqResend()') } catch (err) { /* 忽略 */ }
+        } else {
+          delete resendCount[sid]
+          emit({ type: 'error', message: '收到的数据不完整，请重试' })
+        }
+        return
+      }
+      delete resendCount[sid]
       handleMessage(text)
     }
 
@@ -460,24 +510,70 @@ export function runAdapterImport(opts) {
     }
 
     // ---------- 页面加载后注入 ----------
+    // 只在 loaded 里注入是不够的：不少教务（智慧校园门户）是站内跳转/SPA，
+    // 从首页切到「课表查询」不会触发 loaded，脚本就永远等不到运行时机。
+    // 所以再加一个 URL 轮询：地址一变就再注入一次（适配脚本自己按 URL 去重）。
+    let lastInjectedUrl = ''
+
+    function injectScripts(url) {
+      if (!wv) return
+      const target = String(url || '')
+      if (target && target === lastInjectedUrl) return
+      lastInjectedUrl = target
+      const shim = buildShimScript()
+      const adapterGuard = buildAdapterScript(script)
+      try {
+        wv.evalJS(shim)
+        wv.evalJS(BRIDGE_JS)
+        wv.evalJS(adapterGuard)
+        didInject = true
+        const host = (target.match(/^https?:\/\/([^/]+)/i) || [])[1] || ''
+        emit({ type: 'injected', message: '已注入适配脚本' + (host ? '（' + host + '）' : '') })
+      } catch (e) {
+        emit({ type: 'error', message: '注入脚本失败：' + e.message })
+      }
+    }
+
     function onLoaded() {
       if (!wv) return
       if (injectTimer) clearTimeout(injectTimer)
       injectTimer = setTimeout(() => {
-        if (!wv) return
-        const shim = buildShimScript()
-        const adapterGuard = buildAdapterScript(script)
-        try {
-          wv.evalJS(shim)
-          wv.evalJS(BRIDGE_JS)
-          wv.evalJS(adapterGuard)
-          didInject = true
-          const host = (pageUrl.match(/^https?:\/\/([^/]+)/i) || [])[1] || ''
-          emit({ type: 'injected', message: '已注入适配脚本' + (host ? '（' + host + '）' : '') })
-        } catch (e) {
-          emit({ type: 'error', message: '注入脚本失败：' + e.message })
-        }
+        injectScripts(pageUrl)
       }, INJECT_DELAY)
+    }
+
+    // 标题通道：脚本把分片写进 document.title，这里轮询读取。
+    // 不依赖 overrideUrlLoading，所以在拦截不到自定义 scheme 的 WebView 上也能通。
+    function startTitleWatcher() {
+      let lastTitle = ''
+      titleTimer = setInterval(() => {
+        if (!wv || settled) return
+        let title = ''
+        try { title = String(wv.getTitle ? wv.getTitle() || '' : '') } catch (e) { title = '' }
+        if (!title || title === lastTitle) return
+        lastTitle = title
+        if (title.indexOf('SQMSG|') !== 0) return
+        const parts = title.split('|')
+        if (parts.length < 5) return
+        const sid = parts[1]
+        const index = parseInt(parts[2], 10)
+        const total = parseInt(parts[3], 10)
+        const data = parts.slice(4).join('|')
+        if (!sid || !isFinite(index) || !isFinite(total) || !data) return
+        acceptChunk(sid, index, total, data)
+      }, 150)
+    }
+    function startUrlWatcher() {
+      urlTimer = setInterval(() => {
+        if (!wv || settled) return
+        let current = ''
+        try { current = String(wv.getURL ? wv.getURL() || '' : '') } catch (e) { current = '' }
+        if (!current || !/^https?:\/\//i.test(current)) return
+        if (current === pageUrl) return
+        pageUrl = current
+        if (injectTimer) clearTimeout(injectTimer)
+        injectTimer = setTimeout(() => injectScripts(current), INJECT_DELAY)
+      }, 900)
     }
 
     function onClose() {
@@ -528,6 +624,8 @@ export function runAdapterImport(opts) {
         emit({ type: 'error', message: '页面加载失败' + (code ? '（' + code + '）' : '') })
       })
       wv.addEventListener('close', onClose)
+      startUrlWatcher()
+      startTitleWatcher()
       wv.overrideUrlLoading(
         { mode: 'reject', match: '^shiguang-import://', effect: 'instant' },
         (result) => onIntercept(result)

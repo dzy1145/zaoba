@@ -24,9 +24,28 @@ function check(name, actual, expected) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// 分片是 ack 串行发的：等到 URL 数量稳定下来再断言（比死等更稳）
+async function settle(urls, timeoutMs = 30000) {
+  let last = -1
+  let stable = 0
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    await sleep(300)
+    if (urls.length === last && urls.length > 0) {
+      stable += 1
+      if (stable >= 3) return
+    } else {
+      last = urls.length
+      stable = 0
+    }
+  }
+}
+
 // ---- 造一个「教务页面」的运行环境 ----
 function createPage() {
   const urls = []
+  const titles = []
+  let currentUrl = 'https://jw.example.edu.cn/index'
   const sandbox = {
     btoa,
     unescape,
@@ -38,15 +57,28 @@ function createPage() {
     Promise,
     console,
     setTimeout,
-    clearTimeout
+    clearTimeout,
+    setInterval,
+    clearInterval
+  }
+  // 写 document.title = 代表宿主「轮询到了并回了 ack」（模拟 wv.getTitle 轮询 + evalJS 回写）
+  sandbox.document = {
+    get title() { return titles.length ? titles[titles.length - 1] : '教务系统' },
+    set title(v) {
+      const text = String(v)
+      titles.push(text)
+      const parts = text.split('|')
+      if (parts[0] === 'SQMSG') sandbox.window.__sqAckIdx = parseInt(parts[2], 10)
+    }
   }
   sandbox.window = {
     location: {
+      get href() { return currentUrl },
       set href(value) { urls.push(String(value)) }
     }
   }
   vm.createContext(sandbox)
-  return { sandbox, urls }
+  return { sandbox, urls, titles, setUrl: (u) => { currentUrl = String(u) } }
 }
 
 // 把拦到的 URL 按 sid 拼回去（等同宿主 onIntercept 的逻辑）
@@ -116,7 +148,7 @@ function collect(urls) {
   }))
   const payload = JSON.stringify(courses)
   sandbox.window.shiguangBridgePromise.saveImportedCourses(payload)
-  await sleep(1200)
+  await settle(urls)
 
   const got = collect(urls)
   check('大消息被切成多片', got.length, 1)
@@ -146,24 +178,29 @@ function collect(urls) {
   check('校验失败返回中文提示', byId.v2, '请输入 4 位年份')
 }
 
-// ---- 4. 适配脚本同一页面只跑一次 + 异常不炸宿主 ----
+// ---- 4. 适配脚本同一 URL 只跑一次；换页（站内跳转）要能再跑一次 + 异常不炸宿主 ----
 {
-  const { sandbox, urls } = createPage()
+  const { sandbox, urls, setUrl } = createPage()
   vm.runInContext(buildShimScript(), sandbox)
   vm.runInContext(BRIDGE_JS, sandbox)
 
   const adapter = 'window.__runCount = (window.__runCount || 0) + 1; window.shiguangBridge.showToast("跑了一次")'
   vm.runInContext(buildAdapterScript(adapter), sandbox)
   vm.runInContext(buildAdapterScript(adapter), sandbox)
-  check('适配脚本只执行一次', sandbox.window.__runCount, 1)
+  check('同一 URL 只执行一次', sandbox.window.__runCount, 1)
+
+  // 站内跳转到课表页（SPA/门户常见：不触发 loaded，靠宿主轮询 URL 发现变化）
+  setUrl('https://jw.example.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html')
+  vm.runInContext(buildAdapterScript(adapter), sandbox)
+  check('换页后会重新执行', sandbox.window.__runCount, 2)
 
   const bad = 'throw new Error("boom")'
   let threw = false
   try { vm.runInContext(buildAdapterScript(bad), sandbox) } catch (e) { threw = true }
   check('适配脚本抛错不炸宿主', threw, false)
   await sleep(120)
-  const toastCalled = sandbox.window.__sqAdapterRan === true
-  check('异常后标记已注入，避免死循环重试', toastCalled, true)
+  const toastCalled = sandbox.window.__sqAdapterUrl === 'https://jw.example.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html'
+  check('异常后仍标记当前 URL，避免死循环重试', toastCalled, true)
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`)
