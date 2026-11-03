@@ -184,6 +184,14 @@ export function runAdapterImport(opts) {
 
   const emit = (e) => {
     try { if (onEvent) onEvent(e) } catch (err) { /* 忽略 UI 回调异常 */ }
+    // 教务窗口是独立原生窗口，页面里的状态文字被挡住 —— 关键节点用原生 toast 报给用户看
+    try {
+      const type = e && e.type
+      const keyTypes = ['injected', 'courses', 'timeSlots', 'config', 'done', 'error']
+      if (type && keyTypes.indexOf(type) >= 0 && e.message) {
+        plus.nativeUI.toast(String(e.message), { duration: 'long', verticalAlign: 'bottom' })
+      }
+    } catch (err) { /* 忽略 */ }
   }
 
   return new Promise((resolve, reject) => {
@@ -344,21 +352,39 @@ export function runAdapterImport(opts) {
       payload = payload || {}
 
       if (action === 'showToast') {
-        uni.showToast({ title: String(payload.message || ''), icon: 'none' })
+        const text = String(payload.message || '')
+        if (text) {
+          // 教务窗口是独立的原生窗口，盖住了整个页面 —— uni.showToast 画在页面里，看不见。
+          // 必须用原生 toast，否则适配脚本的「请先登录」「导入失败」这类提示全是静默的。
+          try {
+            plus.nativeUI.toast(text, { duration: 'long', verticalAlign: 'bottom' })
+          } catch (e) {
+            uni.showToast({ title: text, icon: 'none' })
+          }
+          emit({ type: 'toast', message: text })
+        }
         return
       }
 
       if (action === 'showAlert') {
+        const title = String(payload.titleText || '提示')
+        const content = String(payload.contentText || '')
+        const confirmText = String(payload.confirmText || '确定')
+        // 同样必须走原生弹窗：uni.showModal 画在页面里，会被教务窗口盖住
         const ok = await new Promise((res) => {
-          uni.showModal({
-            title: String(payload.titleText || '提示'),
-            content: String(payload.contentText || ''),
-            showCancel: true,
-            cancelText: '取消',
-            confirmText: String(payload.confirmText || '确定'),
-            success: (r) => res(!!r.confirm),
-            fail: () => res(false)
-          })
+          try {
+            plus.nativeUI.confirm(content, (e) => res(!!e && e.index === 1), title, ['取消', confirmText])
+          } catch (e) {
+            uni.showModal({
+              title,
+              content,
+              showCancel: true,
+              cancelText: '取消',
+              confirmText,
+              success: (r) => res(!!r.confirm),
+              fail: () => res(false)
+            })
+          }
         })
         resolveJs(callbackId, ok ? 'true' : 'false')
         return
@@ -373,13 +399,25 @@ export function runAdapterImport(opts) {
       if (action === 'showSingleSelection') {
         let items = []
         try { items = JSON.parse(payload.itemsJsonString || '[]') } catch (e) { items = [] }
+        const title = String(payload.titleText || '')
         const index = await new Promise((res) => {
           if (!items.length) { res(null); return }
-          uni.showActionSheet({
-            itemList: items.map((x) => String(x)),
-            success: (r) => res(r.tapIndex),
-            fail: () => res(null)
-          })
+          try {
+            plus.nativeUI.actionSheet({
+              title,
+              cancel: '取消',
+              buttons: items.map((x) => ({ title: String(x) }))
+            }, (e) => {
+              const i = e && typeof e.index === 'number' ? e.index : 0
+              res(i > 0 ? i - 1 : null) // 0 是取消，按钮从 1 开始
+            })
+          } catch (err) {
+            uni.showActionSheet({
+              itemList: items.map((x) => String(x)),
+              success: (r) => res(r.tapIndex),
+              fail: () => res(null)
+            })
+          }
         })
         resolveJs(callbackId, index === null ? 'null' : String(index))
         return
@@ -387,7 +425,9 @@ export function runAdapterImport(opts) {
 
       if (action === 'saveImportedCourses') {
         collected.coursesJson = String(payload.coursesJsonString || '')
-        emit({ type: 'courses', message: '已收到课程数据' })
+        let courseCount = 0
+        try { const arr = JSON.parse(collected.coursesJson); courseCount = Array.isArray(arr) ? arr.length : 0 } catch (e) { courseCount = 0 }
+        emit({ type: 'courses', message: courseCount ? ('已抓到 ' + courseCount + ' 门课程') : '已收到课程数据' })
         resolveJs(callbackId, 'true')
         return
       }
@@ -478,6 +518,10 @@ export function runAdapterImport(opts) {
       })
       wv.addEventListener('show', () => {
         emit({ type: 'open', message: '已打开教务系统' })
+        // 给个一次性提示：很多人不知道打开后要干什么
+        try {
+          plus.nativeUI.toast('在这里登录教务系统，登录后会自动开始导入', { duration: 'long', verticalAlign: 'bottom' })
+        } catch (e) { /* 忽略 */ }
       })
       wv.addEventListener('error', (err) => {
         const code = (err && (err.code || err.message)) || ''
