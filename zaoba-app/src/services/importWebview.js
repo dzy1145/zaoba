@@ -223,6 +223,7 @@ export function runAdapterImport(opts) {
     let injectTimer = null
     let urlTimer = null
     let titleTimer = null
+    let completeTimer = null
     let pageUrl = ''
     let didInject = false
     let validatorSeq = 0
@@ -235,6 +236,7 @@ export function runAdapterImport(opts) {
       if (injectTimer) { clearTimeout(injectTimer); injectTimer = null }
       if (urlTimer) { clearInterval(urlTimer); urlTimer = null }
       if (titleTimer) { clearInterval(titleTimer); titleTimer = null }
+      if (completeTimer) { clearTimeout(completeTimer); completeTimer = null }
       Object.keys(validatorWaiters).forEach((k) => {
         const w = validatorWaiters[k]
         delete validatorWaiters[k]
@@ -243,9 +245,18 @@ export function runAdapterImport(opts) {
       if (wv) {
         try { wv.removeEventListener('loaded', onLoaded) } catch (e) { /* 忽略 */ }
         try { wv.removeEventListener('close', onClose) } catch (e) { /* 忽略 */ }
-        try { wv.close('fade-out') } catch (e) { /* 忽略 */ }
+        try { wv.close('none') } catch (e) { /* 忽略 */ }
       }
       session = null
+      // 关窗后把焦点还给页面窗口：否则真机上会留下一个透明窗口，
+      // 表现是「页面点不动、搜索框点不出输入法」（2026-11-03 用 adb 复现过）
+      setTimeout(() => {
+        try { plus.key.hideSoftKeybord() } catch (e) { /* 忽略 */ }
+        try {
+          const page = plus.webview.currentWebview()
+          if (page && page.show) page.show('none')
+        } catch (e) { /* 忽略 */ }
+      }, 300)
     }
 
     function finish(completed) {
@@ -425,7 +436,6 @@ export function runAdapterImport(opts) {
 
       const action = msg.action
       // 临时诊断：把每条脚本消息用原生 toast 报出来（排查卡在哪一步用，定位完就删）
-      try { plus.nativeUI.toast('⇠ ' + action, { duration: 'short' }) } catch (e) { /* 忽略 */ }
       const callbackId = msg.callbackId
       let payload = null
       if (msg.payload) {
@@ -491,6 +501,12 @@ export function runAdapterImport(opts) {
         try { const arr = JSON.parse(collected.coursesJson); courseCount = Array.isArray(arr) ? arr.length : 0 } catch (e) { courseCount = 0 }
         emit({ type: 'courses', message: courseCount ? ('已抓到 ' + courseCount + ' 门课程') : '已收到课程数据' })
         resolveJs(callbackId, 'true')
+        // 拿到课程就算成功：适配脚本的尾巴（学期配置/节次/完成通知）要是没发上来，
+        // 4 秒后也照样结束导入，别让用户干等着（真机上出现过只剩「已抓到 N 门课程」就不动）
+        if (completeTimer) clearTimeout(completeTimer)
+        completeTimer = setTimeout(() => {
+          if (!settled && collected.coursesJson) finish(true)
+        }, 4000)
         return
       }
 
