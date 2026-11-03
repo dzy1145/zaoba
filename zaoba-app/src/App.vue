@@ -1,6 +1,6 @@
 <script>
 import { initDatabase } from './services/database.js'
-import { autoCheckUpdate, promptAndInstall, isUpdateSupported } from './services/updater.js'
+import { autoCheckUpdate, promptAndInstall, isUpdateSupported, cleanupUpdateFiles } from './services/updater.js'
 
 export default {
   async onLaunch() {
@@ -8,6 +8,13 @@ export default {
       await initDatabase()
     } catch (error) {
       console.error('数据库初始化失败', error)
+    }
+
+    // 清掉上次没下完的安装包（固定文件名，最多一个；失败中断也不会越攒越多）
+    try {
+      cleanupUpdateFiles()
+    } catch (e) {
+      /* 忽略 */
     }
 
     // 系统明暗切换时通知各页面重新解析主题（"跟随系统"模式需要）

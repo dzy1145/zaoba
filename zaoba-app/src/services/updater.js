@@ -168,7 +168,7 @@ function requestJson(url) {
 
 // 当前安装的版本：App 端优先 plus.runtime.version（和 manifest 的 versionName 一致），
 // 拿不到再问 getProperty；H5 / 极端兜底用 FALLBACK_VERSION —— 发版时必须跟 manifest 一起改。
-export const FALLBACK_VERSION = '1.2.4'
+export const FALLBACK_VERSION = '1.2.5'
 
 export function getCurrentVersion() {
   return new Promise((resolve) => {
@@ -278,8 +278,54 @@ export function skipVersion(versionName) {
 // ---------- 下载 / 安装 ----------
 
 const KEY_MIRROR = 'updateMirrorUrl'
-const STALL_MS = 8000
-const DOWNLOAD_TIMEOUT = 20000
+const STALL_MS = 8000        // 多久没有新字节就判卡死，换下一条线路
+const SLOW_MS = 20000        // 一直在动但很慢，最多忍这么久
+const SLOW_BPS = 100 * 1024  // 慢速阈值 100KB/s
+const DOWNLOAD_TIMEOUT = 120 // 单条线路的硬超时（秒）
+// 固定文件名：每次下载前删掉它，abort 时 plus 也会删除未完成的临时文件，
+// 所以手机上最多存一个安装包，不会因为反复失败堆积。
+export const DOWNLOAD_FILE = '_downloads/zaoba-update.apk'
+
+function removeFile(path) {
+  return new Promise((resolve) => {
+    if (!isAppRuntime()) { resolve(false); return }
+    try {
+      plus.io.resolveLocalFileSystemURL(String(path), (entry) => {
+        entry.remove(() => resolve(true), () => resolve(false))
+      }, () => resolve(false))
+    } catch (e) {
+      resolve(false)
+    }
+  })
+}
+
+// 清掉下载残留（启动时、每次下载前都调一次，手机上不会攒安装包）
+export function cleanupUpdateFiles() {
+  const jobs = [removeFile(DOWNLOAD_FILE)]
+  // 老版本用 uni.downloadFile 下过，可能在 uniapp_temp 里留 *.apk，顺手扫掉（尽力而为）
+  ;['_doc/uniapp_temp/', '_doc/uniapp_temp/download/'].forEach((dir) => {
+    jobs.push(new Promise((resolve) => {
+      if (!isAppRuntime()) { resolve(false); return }
+      try {
+        plus.io.resolveLocalFileSystemURL(dir, (entry) => {
+          const reader = entry.createReader()
+          reader.readEntries((entries) => {
+            const apks = (entries || []).filter((e) => e && e.isFile && /\.apk$/i.test(e.name || ''))
+            if (!apks.length) { resolve(true); return }
+            let pending = apks.length
+            apks.forEach((e) => {
+              e.remove(() => { pending -= 1; if (!pending) resolve(true) },
+                () => { pending -= 1; if (!pending) resolve(false) })
+            })
+          }, () => resolve(false))
+        }, () => resolve(false))
+      } catch (err) {
+        resolve(false)
+      }
+    }))
+  })
+  return Promise.all(jobs)
+}
 
 // 上次成功的那条线路排最前（手机 5G 和 WiFi 的最优线路不一样，实测差很多）
 export function orderMirrorUrls(urls) {
@@ -297,101 +343,102 @@ export function formatSpeed(bytesPerSec) {
   return Math.round(v) + ' B/s'
 }
 
-// 下载 APK：uni.downloadFile 能拿字节级进度；8 秒没有新字节就判卡死，自动换下一条线路。
-// 只靠 timeout 不行 —— 连接建立了但龟速不动时 timeout 不会触发。
-export function downloadApk(manifest, onProgress) {
-  if (!isAppRuntime() || !manifest || !manifest.apk) {
-    return Promise.reject(new Error('没有可下载的安装包'))
-  }
-  const candidates = orderMirrorUrls(manifest.apk.urls)
-  if (!candidates.length) return Promise.reject(new Error('清单里没有下载地址'))
-
-  return new Promise((resolve, reject) => {
-    let index = 0
+// 单条线路：固定文件名下载。成功返回本地路径，失败/卡住/太慢都返回 null
+function downloadFrom(url, onProgress) {
+  return new Promise((resolve) => {
     let task = null
-    let watchdog = null
-    let stalled = false
-    let lastReceived = 0
-    let lastTick = Date.now()
+    let done = false
+    let lastSize = 0
+    let lastProgressAt = Date.now()
+    const startedAt = Date.now()
     let speed = 0
+    let watchdog = null
 
-    const stop = () => {
+    const settle = (path) => {
+      if (done) return
+      done = true
       if (watchdog) { clearInterval(watchdog); watchdog = null }
-      if (task) {
-        try { task.abort() } catch (e) { /* 已经结束了 */ }
-        task = null
-      }
+      resolve(path)
+    }
+    const giveUp = () => {
+      if (done) return
+      done = true
+      if (watchdog) { clearInterval(watchdog); watchdog = null }
+      try { if (task) task.abort() } catch (e) { /* 已结束 */ }
+      resolve(null) // abort 会顺带删掉没下完的临时文件
     }
 
-    const tryNext = (reason) => {
-      stop()
-      if (index >= candidates.length) {
-        reject(new Error(reason || '所有下载线路都失败了'))
-        return
-      }
-      const url = candidates[index]
-      index += 1
-      lastReceived = 0
-      lastTick = Date.now()
-      stalled = false
-      speed = 0
-
-      task = uni.downloadFile({
-        url,
+    try {
+      task = plus.downloader.createDownload(url, {
+        filename: DOWNLOAD_FILE,
         timeout: DOWNLOAD_TIMEOUT,
-        success: (res) => {
-          stop()
-          if (!res || res.statusCode !== 200 || !res.tempFilePath) {
-            tryNext('HTTP ' + ((res && res.statusCode) || 0))
-            return
-          }
-          writeStorage(KEY_MIRROR, url)
-          resolve(res.tempFilePath)
-        },
-        fail: (err) => {
-          stop()
-          tryNext((err && err.errMsg) || '下载失败')
-        }
+        retry: 0
+      }, (result, status) => {
+        if (done) return
+        if (status === 200 && result && result.filename) settle(result.filename)
+        else giveUp()
       })
+    } catch (e) {
+      settle(null)
+      return
+    }
 
-      if (task && typeof task.onProgressUpdate === 'function') {
-        task.onProgressUpdate((res) => {
-          const now = Date.now()
-          const total = res.totalBytesExpectedToWrite || 0
-          const received = res.totalBytesWritten || 0
-          if (!total) return
-          // 每 200ms 更新一次速度，避免进度回调太密时抖动
-          if (now - lastTick > 200) {
-            speed = ((received - lastReceived) / (now - lastTick)) * 1000
-            lastTick = now
-            lastReceived = received
-          }
-          if (onProgress) {
-            const percent = res.progress != null ? res.progress : (received / total) * 100
-            onProgress({
-              percent: Math.min(99, Math.round(percent)),
-              received,
-              total,
-              bytesPerSec: speed
-            })
-          }
+    task.addEventListener('statechanged', (t) => {
+      if (done || !t) return
+      const total = Number(t.totalSize) || 0
+      const size = Number(t.downloadedSize) || 0
+      const now = Date.now()
+      if (size <= lastSize) return
+      const dt = now - lastProgressAt
+      if (dt > 300) {
+        speed = ((size - lastSize) / dt) * 1000
+        lastProgressAt = now
+        lastSize = size
+      }
+      if (total && onProgress) {
+        onProgress({
+          percent: Math.min(99, Math.round((size / total) * 100)),
+          received: size,
+          total,
+          bytesPerSec: speed
         })
       }
+    })
 
-      // 看门狗：一直没有新字节就换线路（不能只靠 timeout）
-      watchdog = setInterval(() => {
-        if (stalled) return
-        if (Date.now() - lastTick > STALL_MS) {
-          stalled = true
-          tryNext('线路卡住，换一条')
-        }
-      }, 1500)
-    }
+    watchdog = setInterval(() => {
+      if (done) return
+      // 卡死：8 秒没有新字节
+      if (Date.now() - lastProgressAt > STALL_MS) { giveUp(); return }
+      // 太慢：20 秒后还不到 100KB/s，而且没下多少 —— 换条线路试试
+      if (Date.now() - startedAt > SLOW_MS && lastSize < 6 * 1024 * 1024 && speed > 0 && speed < SLOW_BPS) {
+        giveUp()
+      }
+    }, 1000)
 
-    tryNext('')
+    try { task.start() } catch (e) { giveUp() }
   })
 }
 
+// 下载 APK：按线路依次试。每条都先删旧文件（固定名字），手机里最多留一个安装包。
+export async function downloadApk(manifest, onProgress) {
+  if (!isAppRuntime() || !manifest || !manifest.apk) {
+    throw new Error('没有可下载的安装包')
+  }
+  const candidates = orderMirrorUrls(manifest.apk.urls)
+  if (!candidates.length) throw new Error('清单里没有下载地址')
+
+  for (let i = 0; i < candidates.length; i++) {
+    const url = candidates[i]
+    if (onProgress) onProgress({ percent: 0, received: 0, total: 0, bytesPerSec: 0, line: i + 1, lines: candidates.length })
+    await removeFile(DOWNLOAD_FILE)
+    const path = await downloadFrom(url, onProgress)
+    if (path) {
+      writeStorage(KEY_MIRROR, url)
+      return path
+    }
+  }
+  throw new Error('所有下载线路都失败了，换个网络（或连 WiFi）再试')
+}
 // 用哪个摘要校验：md5 优先（uni.getFileInfo 在 App 端只保证 md5/sha1，
 // 传 sha256 会直接失败 —— 2026-11-03 真机就是这么报「读取安装包失败」的）
 export function chooseDigest(manifest) {
@@ -560,9 +607,16 @@ export async function promptAndInstall(latest, opts = {}) {
 
   let path = ''
   try {
+    let lastUiAt = 0
     path = await downloadApk(latest, (progress) => {
+      // 原生等待框每次改文案都是一次原生调用；跟着下载进度每帧重建会卡顿甚至崩，
+      // 所以 600ms 才更新一次（到 99% 立刻更新）。
+      const now = Date.now()
+      if (progress.percent < 99 && now - lastUiAt < 600) return
+      lastUiAt = now
       const speedText = formatSpeed(progress.bytesPerSec)
-      const text = '下载中 ' + progress.percent + '%' + (speedText ? ' · ' + speedText : '')
+      const lineText = progress.lines > 1 ? ' 线路' + progress.line + '/' + progress.lines : ''
+      const text = '下载中 ' + progress.percent + '%' + (speedText ? ' · ' + speedText : '') + lineText
       try { plus.nativeUI.showWaiting(text, { padlock: true }) } catch (e) { /* 忽略 */ }
     })
   } catch (e) {

@@ -10,6 +10,7 @@ import {
   shouldPrompt,
   orderMirrorUrls,
   chooseDigest,
+  DOWNLOAD_FILE,
   formatSpeed,
   looksLikePermissionError,
   getCurrentVersion,
@@ -105,6 +106,9 @@ check('只有 sha256 才用 sha256', chooseDigest({ apk: { sha256: 'CD' } }), { 
 check('都没有返回 null（退回大小校验）', chooseDigest({ apk: {} }), null)
 check('没有 apk 返回 null', chooseDigest(null), null)
 check('清单里的 md5 前缀会被去掉', normalizeManifest({ versionName: '1.0.0', apk: { urls: ['u'], md5: 'MD5:AA', sha256: 'SHA256:BB' } }).apk.md5, 'aa')
+// ---- 下载落点固定：反复失败也不会在手机上堆一堆安装包 ----
+check('下载文件名固定', DOWNLOAD_FILE, '_downloads/zaoba-update.apk')
+
 // ---- 常量检查（别把仓库地址写错） ----
 check('清单镜像 3 路', MANIFEST_URLS.length, 3)
 check('镜像都指向 zaoba 仓库', MANIFEST_URLS.every((u) => u.indexOf('dzy1145/zaoba') >= 0), true)
